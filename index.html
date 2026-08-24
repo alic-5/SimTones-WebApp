@@ -267,6 +267,7 @@
 
     <div class="row"><label>Equal amplitudes</label><input type="checkbox" id="equalAmp"></div>
     <div class="row"><label>Show envelope</label><input type="checkbox" id="showEnv" checked></div>
+    <div class="row"><label>Measured envelope freq (Hilbert + FFT peak)</label><input type="checkbox" id="showHilbert"></div>
     <div class="row"><label>Show behavioural data points</label><input type="checkbox" id="showData" checked></div>
     <div class="row"><label>Log-log axes</label><input type="checkbox" id="axisScale" checked></div>
 
@@ -705,6 +706,55 @@ function fft(re, im){
   }
 }
 
+// ---------------------------------------------------------------
+// Hilbert transform (via FFT) -> analytic-signal envelope -> FFT peak
+// of that envelope = a MEASURED envelope frequency, as an empirical
+// cross-check against the theoretical ENV formula used elsewhere.
+// ---------------------------------------------------------------
+function hilbertEnvelope(sig){
+  let n = 1; while (n<sig.length) n*=2;
+  const re = new Float64Array(n), im = new Float64Array(n);
+  re.set(sig);
+  fft(re, im); // re,im now hold the forward spectrum X[k]
+
+  // Build the analytic-signal spectrum: keep DC and Nyquist as-is,
+  // double the positive frequencies, zero out the negative frequencies.
+  for (let k=1;k<n/2;k++){ re[k]*=2; im[k]*=2; }
+  for (let k=n/2+1;k<n;k++){ re[k]=0; im[k]=0; }
+
+  // Inverse FFT via the conjugate trick: ifft(X) = conj(fft(conj(X)))/n
+  for (let k=0;k<n;k++) im[k] = -im[k];
+  fft(re, im);
+  for (let k=0;k<n;k++){ re[k] = re[k]/n; im[k] = -im[k]/n; }
+
+  const envelope = new Float64Array(sig.length);
+  for (let k=0;k<sig.length;k++) envelope[k] = Math.hypot(re[k], im[k]);
+  return envelope;
+}
+
+function hilbertEnvelopeFreq(sig, fs){
+  const env = hilbertEnvelope(sig);
+  const mean = env.reduce((a,b)=>a+b,0)/env.length;
+  const centered = new Float64Array(env.length);
+  for (let i=0;i<env.length;i++) centered[i] = env[i]-mean;
+
+  let n = 1; while (n<centered.length) n*=2;
+  const re = new Float64Array(n), im = new Float64Array(n);
+  re.set(centered);
+  fft(re, im);
+
+  const half = n/2;
+  let bestK = 1, bestMag = -1;
+  for (let k=1;k<half;k++){
+    const freq = k*fs/n;
+    if (freq < 1) continue;    // ignore near-DC
+    if (freq > 500) break;     // cap at the tactile range used elsewhere in the app
+    const mag = Math.hypot(re[k], im[k]);
+    if (mag > bestMag){ bestMag = mag; bestK = k; }
+  }
+  return bestK*fs/n;
+}
+
 function drawFFT(sig){
   resizeCanvas(cvFFT);
   const W = cvFFT.width, H = cvFFT.height;
@@ -1082,11 +1132,19 @@ function updateReadout(){
     : '';
   const hasSpikes = !!TOUCHSIM_MAP[pairKey(state.f1, state.f2)];
 
+  let hilbertLine = '';
+  if (document.getElementById('showHilbert').checked){
+    const sig = synthesize();
+    const measuredEnvF = hilbertEnvelopeFreq(sig, FS);
+    hilbertLine = `Envelope (measured, Hilbert+FFT): <b>${measuredEnvF.toFixed(1)} Hz</b><br>`;
+  }
+
   document.getElementById('readout').innerHTML = `
     f1 = <b>${state.f1} Hz</b>  &nbsp; f2 = <b>${state.f2} Hz</b><br>
     Class: <span class="tag ${tagClass}">${tagLabel}</span><br>
     ENV = <b>${ENV.toFixed(1)} Hz</b> &nbsp; FS = <b>${fs.toFixed(1)} Hz</b><br>
     Envelope (theoretical): <b>${envF.toFixed(1)} Hz</b><br>
+    ${hilbertLine}
     Model: <b>${pct.toFixed(1)}%</b> perceived as 2<br>
     Perceived frequency: <b>${perceivedStr}</b><br>
     ${behavLine}
@@ -1141,6 +1199,7 @@ document.getElementById('equalAmp').addEventListener('change', (e)=>{
 document.getElementById('showEnv').addEventListener('change', (e)=>{
   state.showEnv = e.target.checked; updateAll();
 });
+document.getElementById('showHilbert').addEventListener('change', updateAll);
 document.getElementById('envWin').addEventListener('input', (e)=>{
   state.envWin = parseInt(e.target.value);
   document.getElementById('envWinVal').textContent = state.envWin;
